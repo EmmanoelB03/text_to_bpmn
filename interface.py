@@ -167,7 +167,7 @@ def extrair_json(texto: str) -> dict:
         return json.loads(json_str_fixed)
 
 def json_to_bpmn_xml(data: dict) -> str:
-    """Converte JSON em XML BPMN 2.0"""
+    """Converte JSON em XML BPMN 2.0 com layout inteligente"""
     root = ET.Element("bpmn:definitions")
     root.set("xmlns:bpmn", "http://www.omg.org/spec/BPMN/20100524/MODEL")
     root.set("xmlns:bpmndi", "http://www.omg.org/spec/BPMN/20100524/DI")
@@ -184,6 +184,7 @@ def json_to_bpmn_xml(data: dict) -> str:
     fluxos = data.get("fluxos", [])
     node_map = {}
     
+    # Criar elementos
     for elem in elementos:
         tipo = elem.get("tipo", "task")
         elem_id = elem.get("id", "Element_1")
@@ -205,6 +206,7 @@ def json_to_bpmn_xml(data: dict) -> str:
             event.set("name", nome)
         node_map[elem_id] = event
     
+    # Criar fluxos
     for i, fluxo in enumerate(fluxos):
         flow = ET.SubElement(process, "bpmn:sequenceFlow")
         flow_id = fluxo.get("id", f"Flow_{i+1}")
@@ -221,62 +223,156 @@ def json_to_bpmn_xml(data: dict) -> str:
             incoming = ET.SubElement(destino, "bpmn:incoming")
             incoming.text = flow_id
     
+    # === LAYOUT INTELIGENTE ===
+    
+    # Construir grafo de dependências
+    graph = {elem['id']: [] for elem in elementos}
+    in_degree = {elem['id']: 0 for elem in elementos}
+    
+    for fluxo in fluxos:
+        origem = fluxo.get('origem')
+        destino = fluxo.get('destino')
+        if origem and destino:
+            graph[origem].append(destino)
+            in_degree[destino] += 1
+    
+    # Topological sort para níveis (camadas)
+    levels = {}
+    queue = [elem_id for elem_id, degree in in_degree.items() if degree == 0]
+    current_level = 0
+    
+    while queue:
+        next_queue = []
+        for node in queue:
+            levels[node] = current_level
+            for neighbor in graph[node]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    next_queue.append(neighbor)
+        queue = next_queue
+        current_level += 1
+    
+    # Agrupar elementos por nível
+    level_groups = {}
+    for elem in elementos:
+        elem_id = elem['id']
+        level = levels.get(elem_id, 0)
+        if level not in level_groups:
+            level_groups[level] = []
+        level_groups[level].append(elem)
+    
+    # Configurações de espaçamento
+    HORIZONTAL_SPACING = 180
+    VERTICAL_SPACING = 150
+    START_X = 100
+    START_Y = 100
+    
+    # Posicionar elementos
+    for level, elems in sorted(level_groups.items()):
+        x_pos = START_X + (level * HORIZONTAL_SPACING)
+        
+        # Se houver múltiplos elementos no mesmo nível (paralelo)
+        num_elems = len(elems)
+        total_height = (num_elems - 1) * VERTICAL_SPACING
+        y_start = START_Y - (total_height / 2)
+        
+        for idx, elem in enumerate(elems):
+            elem['_level'] = level
+            elem['_index_in_level'] = idx
+            y_pos = y_start + (idx * VERTICAL_SPACING)
+            
+            tipo = elem.get("tipo", "task")
+            
+            # Dimensões baseadas no tipo
+            if tipo in ["startEvent", "endEvent"]:
+                width, height = 36, 36
+            elif "Gateway" in tipo:
+                width, height = 50, 50
+            else:
+                width, height = 120, 80
+            
+            elem['_x'] = x_pos
+            elem['_y'] = y_pos
+            elem['_width'] = width
+            elem['_height'] = height
+            elem['_x_center'] = x_pos + (width / 2)
+            elem['_y_center'] = y_pos + (height / 2)
+    
+    # Criar diagrama visual
     diagram = ET.SubElement(root, "bpmndi:BPMNDiagram")
     diagram.set("id", "BPMNDiagram_1")
     plane = ET.SubElement(diagram, "bpmndi:BPMNPlane")
     plane.set("id", "BPMNPlane_1")
     plane.set("bpmnElement", "Process_1")
     
-    x_pos = 150
-    y_base = 150
-    
+    # Adicionar shapes
     for elem in elementos:
         elem_id = elem.get("id")
-        tipo = elem.get("tipo", "task")
         
         shape = ET.SubElement(plane, "bpmndi:BPMNShape")
         shape.set("id", f"Shape_{elem_id}")
         shape.set("bpmnElement", elem_id)
         
         bounds = ET.SubElement(shape, "dc:Bounds")
-        
-        if tipo in ["startEvent", "endEvent"]:
-            width, height = 36, 36
-        elif "Gateway" in tipo:
-            width, height = 50, 50
-        else:
-            width, height = 100, 80
-        
-        y_pos = y_base - (height / 2)
-        bounds.set("x", str(x_pos))
-        bounds.set("y", str(y_pos))
-        bounds.set("width", str(width))
-        bounds.set("height", str(height))
-        
-        elem['_x_center'] = x_pos + (width / 2)
-        elem['_y_center'] = y_base
-        x_pos += 200
+        bounds.set("x", str(int(elem['_x'])))
+        bounds.set("y", str(int(elem['_y'])))
+        bounds.set("width", str(int(elem['_width'])))
+        bounds.set("height", str(int(elem['_height'])))
+    
+    # Adicionar edges com waypoints inteligentes
+    elem_dict = {e['id']: e for e in elementos}
     
     for i, fluxo in enumerate(fluxos):
         edge = ET.SubElement(plane, "bpmndi:BPMNEdge")
         edge.set("id", f"Edge_{fluxo.get('id', f'Flow_{i+1}')}")
         edge.set("bpmnElement", fluxo.get("id", f"Flow_{i+1}"))
         
-        origem = next((e for e in elementos if e.get("id") == fluxo.get("origem")), None)
-        destino = next((e for e in elementos if e.get("id") == fluxo.get("destino")), None)
+        origem = elem_dict.get(fluxo.get("origem"))
+        destino = elem_dict.get(fluxo.get("destino"))
         
         if origem and destino:
-            offset_origem = 18 if 'Event' in origem.get('tipo', '') else 50
-            offset_destino = 18 if 'Event' in destino.get('tipo', '') else 50
+            origem_x_end = int(origem['_x'] + origem['_width'])
+            origem_y = int(origem['_y_center'])
+            destino_x_start = int(destino['_x'])
+            destino_y = int(destino['_y_center'])
             
+            # Ponto de saída (direita do elemento de origem)
             wp1 = ET.SubElement(edge, "di:waypoint")
-            wp1.set("x", str(origem['_x_center'] + offset_origem))
-            wp1.set("y", str(origem['_y_center']))
+            wp1.set("x", str(origem_x_end))
+            wp1.set("y", str(origem_y))
             
+            # Verificar se precisa de waypoints intermediários
+            diff_y = abs(origem_y - destino_y)
+            
+            # Se a linha precisa subir/descer
+            if diff_y > 5:  # Tolerância de 5px para considerar "mesma linha"
+                # Calcular ponto intermediário
+                # Sair 50px para direita, depois descer/subir, depois ir até destino
+                mid_x = origem_x_end + 50
+                
+                # Primeiro waypoint: manter altura da origem
+                wp_mid1 = ET.SubElement(edge, "di:waypoint")
+                wp_mid1.set("x", str(mid_x))
+                wp_mid1.set("y", str(origem_y))
+                
+                # Segundo waypoint: mudar para altura do destino
+                wp_mid2 = ET.SubElement(edge, "di:waypoint")
+                wp_mid2.set("x", str(mid_x))
+                wp_mid2.set("y", str(destino_y))
+                
+                # Se ainda há espaço horizontal, adicionar mais um waypoint
+                if destino_x_start - mid_x > 60:
+                    mid_x2 = destino_x_start - 50
+                    wp_mid3 = ET.SubElement(edge, "di:waypoint")
+                    wp_mid3.set("x", str(mid_x2))
+                    wp_mid3.set("y", str(destino_y))
+            
+            # Ponto de entrada (esquerda do elemento de destino)
             wp2 = ET.SubElement(edge, "di:waypoint")
-            wp2.set("x", str(destino['_x_center'] - offset_destino))
-            wp2.set("y", str(destino['_y_center']))
+            wp2.set("x", str(destino_x_start))
+            wp2.set("y", str(destino_y))
     
+    # Converter para XML formatado
     xml_string = ET.tostring(root, encoding='unicode')
     dom = minidom.parseString(xml_string)
     pretty_xml = dom.toprettyxml(indent="  ")
