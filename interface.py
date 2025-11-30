@@ -97,7 +97,7 @@ with st.sidebar:
     # Modelo
     modelo_selecionado = st.selectbox(
         "🤖 Modelo",
-        ["gemini-1.5-flash-exp", "gemini-1.5-flash", "gemini-2.5-pro"],
+        ["gemini-2.5-flash", "gemini-2.5-pro"],
         help="Flash é mais rápido, Pro é mais preciso"
     )
     
