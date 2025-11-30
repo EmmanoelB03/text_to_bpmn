@@ -405,8 +405,8 @@ ESTRUTURA OBRIGATÓRIA:
     {"id": "EndEvent_1", "tipo": "endEvent", "nome": "Fim"}
   ],
   "fluxos": [
-    {"id": "Flow_1", "origem": "StartEvent_1", "destino": "Task_1"},
-    {"id": "Flow_2", "origem": "Task_1", "destino": "EndEvent_1"}
+    {"id": "Flow_1", "origem": "StartEvent_1", "destino": "Task_1", "nome": ""},
+    {"id": "Flow_2", "origem": "Task_1", "destino": "EndEvent_1", "nome": ""}
   ]
 }
 
