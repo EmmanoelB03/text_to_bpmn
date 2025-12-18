@@ -97,7 +97,7 @@ with st.sidebar:
     # Modelo
     modelo_selecionado = st.selectbox(
         "🤖 Modelo",
-        ["gemini-2.5-flash", "gemini-2.5-pro"],
+        ["gemini-2.5-flash", "gemini-2.5-pro","gemma-3-27b-it"],
         help="Flash é mais rápido, Pro é mais preciso"
     )
     
@@ -167,216 +167,282 @@ def extrair_json(texto: str) -> dict:
         return json.loads(json_str_fixed)
 
 def json_to_bpmn_xml(data: dict) -> str:
-    """Converte JSON em XML BPMN 2.0 com layout inteligente"""
+    """Converte JSON em XML BPMN 2.0 com suporte a Pools e Lanes"""
+    
+    # Namespaces
+    ns = {
+        "bpmn": "http://www.omg.org/spec/BPMN/20100524/MODEL",
+        "bpmndi": "http://www.omg.org/spec/BPMN/20100524/DI",
+        "dc": "http://www.omg.org/spec/DD/20100524/DC",
+        "di": "http://www.omg.org/spec/DD/20100524/DI"
+    }
+
+    # Criar Root
     root = ET.Element("bpmn:definitions")
-    root.set("xmlns:bpmn", "http://www.omg.org/spec/BPMN/20100524/MODEL")
-    root.set("xmlns:bpmndi", "http://www.omg.org/spec/BPMN/20100524/DI")
-    root.set("xmlns:dc", "http://www.omg.org/spec/DD/20100524/DC")
-    root.set("xmlns:di", "http://www.omg.org/spec/DD/20100524/DI")
+    for prefix, uri in ns.items():
+        root.set(f"xmlns:{prefix}", uri)
+    
     root.set("id", "Definitions_1")
     root.set("targetNamespace", "http://bpmn.io/schema/bpmn")
     
-    process = ET.SubElement(root, "bpmn:process")
-    process.set("id", "Process_1")
-    process.set("isExecutable", "true")
-    
     elementos = data.get("elementos", [])
     fluxos = data.get("fluxos", [])
+    
+    # 1. Identificar Papéis (Lanes) únicos
+    papeis = []
+    seen_roles = set()
+    
+    # Normalizar papéis para evitar duplicatas por case sensitive
+    for elem in elementos:
+        raw_role = elem.get("papel", "Geral").strip()
+        role_key = raw_role.lower()
+        elem['_role_normalized'] = role_key  # Guardar para uso posterior
+        elem['_role_display'] = raw_role
+        
+        if role_key not in seen_roles:
+            papeis.append(raw_role)
+            seen_roles.add(role_key)
+    
+    # Se não houver papéis, cria um padrão
+    if not papeis: 
+        papeis = ["Processo Principal"]
+
+    # Mapa de Papel -> Índice (para calcular Y)
+    role_map = {p.lower(): i for i, p in enumerate(papeis)}
+    
+    # 2. Estrutura de Colaboração
+    collaboration = ET.SubElement(root, "bpmn:collaboration")
+    collaboration.set("id", "Collaboration_1")
+    
+    participant = ET.SubElement(collaboration, "bpmn:participant")
+    participant.set("id", "Participant_1")
+    participant.set("name", data.get("processo", "Processo de Negócio"))
+    participant.set("processRef", "Process_1")
+    
+    # 3. Processo e LaneSet
+    process = ET.SubElement(root, "bpmn:process")
+    process.set("id", "Process_1")
+    process.set("isExecutable", "false")
+    
+    lane_set = ET.SubElement(process, "bpmn:laneSet")
+    lane_set.set("id", "LaneSet_1")
+    
+    lane_ids = {} # Map role -> lane_id
+    
+    for i, papel in enumerate(papeis):
+        lane_id = f"Lane_{i}"
+        lane = ET.SubElement(lane_set, "bpmn:lane")
+        lane.set("id", lane_id)
+        lane.set("name", papel)
+        lane_ids[papel.lower()] = lane_id
+        
+        # Adicionar flowNodeRef para elementos deste papel
+        for elem in elementos:
+            if elem.get('_role_normalized') == papel.lower():
+                ref = ET.SubElement(lane, "bpmn:flowNodeRef")
+                ref.text = elem.get("id")
+    
+    # 4. Criar Elementos no Processo
     node_map = {}
     
-    # Criar elementos
+    tag_map = {
+        "startEvent": "bpmn:startEvent",
+        "endEvent": "bpmn:endEvent",
+        "task": "bpmn:task",
+        "userTask": "bpmn:userTask",
+        "serviceTask": "bpmn:serviceTask",
+        "exclusiveGateway": "bpmn:exclusiveGateway",
+        "parallelGateway": "bpmn:parallelGateway"
+    }
+
     for elem in elementos:
         tipo = elem.get("tipo", "task")
-        elem_id = elem.get("id", "Element_1")
-        nome = elem.get("nome", "")
+        bpmn_tag = tag_map.get(tipo, "bpmn:task")
         
-        tag_map = {
-            "startEvent": "bpmn:startEvent",
-            "endEvent": "bpmn:endEvent",
-            "task": "bpmn:task",
-            "userTask": "bpmn:userTask",
-            "serviceTask": "bpmn:serviceTask",
-            "exclusiveGateway": "bpmn:exclusiveGateway",
-            "parallelGateway": "bpmn:parallelGateway"
-        }
-        
-        event = ET.SubElement(process, tag_map.get(tipo, "bpmn:task"))
-        event.set("id", elem_id)
-        if nome:
-            event.set("name", nome)
-        node_map[elem_id] = event
-    
-    # Criar fluxos
-    for i, fluxo in enumerate(fluxos):
+        node = ET.SubElement(process, bpmn_tag)
+        node.set("id", elem.get("id"))
+        if elem.get("nome"):
+            node.set("name", elem.get("nome"))
+            
+        node_map[elem.get("id")] = node
+
+    # 5. Criar Fluxos
+    for fluxo in fluxos:
         flow = ET.SubElement(process, "bpmn:sequenceFlow")
-        flow_id = fluxo.get("id", f"Flow_{i+1}")
-        flow.set("id", flow_id)
+        flow.set("id", fluxo.get("id"))
         flow.set("sourceRef", fluxo.get("origem"))
         flow.set("targetRef", fluxo.get("destino"))
         
-        origem = node_map.get(fluxo.get("origem"))
-        destino = node_map.get(fluxo.get("destino"))
-        if origem is not None:
-            outgoing = ET.SubElement(origem, "bpmn:outgoing")
-            outgoing.text = flow_id
-        if destino is not None:
-            incoming = ET.SubElement(destino, "bpmn:incoming")
-            incoming.text = flow_id
+        # Conectar nos nós
+        src = node_map.get(fluxo.get("origem"))
+        tgt = node_map.get(fluxo.get("destino"))
+        if src is not None:
+            out_node = ET.SubElement(src, "bpmn:outgoing")
+            out_node.text = fluxo.get("id")
+        if tgt is not None:
+            in_node = ET.SubElement(tgt, "bpmn:incoming")
+            in_node.text = fluxo.get("id")
+
+    # === CÁLCULO DE LAYOUT (DI) ===
     
-    # === LAYOUT INTELIGENTE ===
+    # Configurações
+    LANE_HEIGHT = 200
+    LANE_HEADER_WIDTH = 30
+    START_X = 150  # Margem esquerda
+    ITEM_WIDTH = 100
+    ITEM_SPACING = 160
     
-    # Construir grafo de dependências
-    graph = {elem['id']: [] for elem in elementos}
-    in_degree = {elem['id']: 0 for elem in elementos}
+    # Construir grafo para definir eixo X (níveis)
+    graph_out = {e['id']: [] for e in elementos}
+    in_degree = {e['id']: 0 for e in elementos}
     
-    for fluxo in fluxos:
-        origem = fluxo.get('origem')
-        destino = fluxo.get('destino')
-        if origem and destino:
-            graph[origem].append(destino)
-            in_degree[destino] += 1
-    
-    # Topological sort para níveis (camadas)
+    for f in fluxos:
+        if f['origem'] in graph_out and f['destino'] in in_degree:
+            graph_out[f['origem']].append(f['destino'])
+            in_degree[f['destino']] += 1
+            
+    # Níveis (Topological Sort simplificado)
     levels = {}
-    queue = [elem_id for elem_id, degree in in_degree.items() if degree == 0]
-    current_level = 0
+    queue = [eid for eid, deg in in_degree.items() if deg == 0]
+    curr_level = 0
     
     while queue:
         next_queue = []
         for node in queue:
-            levels[node] = current_level
-            for neighbor in graph[node]:
+            levels[node] = curr_level
+            for neighbor in graph_out[node]:
                 in_degree[neighbor] -= 1
                 if in_degree[neighbor] == 0:
                     next_queue.append(neighbor)
         queue = next_queue
-        current_level += 1
-    
-    # Agrupar elementos por nível
-    level_groups = {}
+        curr_level += 1
+        
+    # Calcular coordenadas dos elementos
+    max_level = 0
     for elem in elementos:
-        elem_id = elem['id']
-        level = levels.get(elem_id, 0)
-        if level not in level_groups:
-            level_groups[level] = []
-        level_groups[level].append(elem)
-    
-    # Configurações de espaçamento
-    HORIZONTAL_SPACING = 180
-    VERTICAL_SPACING = 150
-    START_X = 100
-    START_Y = 100
-    
-    # Posicionar elementos
-    for level, elems in sorted(level_groups.items()):
-        x_pos = START_X + (level * HORIZONTAL_SPACING)
+        eid = elem['id']
+        level = levels.get(eid, 0)
+        max_level = max(max_level, level)
         
-        # Se houver múltiplos elementos no mesmo nível (paralelo)
-        num_elems = len(elems)
-        total_height = (num_elems - 1) * VERTICAL_SPACING
-        y_start = START_Y - (total_height / 2)
+        role_idx = role_map.get(elem['_role_normalized'], 0)
         
-        for idx, elem in enumerate(elems):
-            elem['_level'] = level
-            elem['_index_in_level'] = idx
-            y_pos = y_start + (idx * VERTICAL_SPACING)
+        # Dimensões baseadas no tipo
+        if "Event" in elem.get("tipo", ""):
+            w, h = 36, 36
+        elif "Gateway" in elem.get("tipo", ""):
+            w, h = 50, 50
+        else:
+            w, h = 100, 80
             
-            tipo = elem.get("tipo", "task")
-            
-            # Dimensões baseadas no tipo
-            if tipo in ["startEvent", "endEvent"]:
-                width, height = 36, 36
-            elif "Gateway" in tipo:
-                width, height = 50, 50
-            else:
-                width, height = 120, 80
-            
-            elem['_x'] = x_pos
-            elem['_y'] = y_pos
-            elem['_width'] = width
-            elem['_height'] = height
-            elem['_x_center'] = x_pos + (width / 2)
-            elem['_y_center'] = y_pos + (height / 2)
-    
-    # Criar diagrama visual
+        # Posição X baseada no nível (sequência)
+        x = START_X + (level * ITEM_SPACING)
+        
+        # Posição Y baseada na Lane (Papel)
+        # Centralizar verticalmente na lane
+        lane_y_start = role_idx * LANE_HEIGHT
+        y = lane_y_start + (LANE_HEIGHT - h) / 2
+        
+        elem['_x'] = x
+        elem['_y'] = y
+        elem['_width'] = w
+        elem['_height'] = h
+        elem['_cx'] = x + w/2
+        elem['_cy'] = y + h/2
+
+    # Calcular tamanho total do diagrama
+    total_width = START_X + ((max_level + 1) * ITEM_SPACING) + 100
+    total_height = len(papeis) * LANE_HEIGHT
+
+    # === GERAR DIAGRAMA (BPMNDI) ===
     diagram = ET.SubElement(root, "bpmndi:BPMNDiagram")
     diagram.set("id", "BPMNDiagram_1")
     plane = ET.SubElement(diagram, "bpmndi:BPMNPlane")
     plane.set("id", "BPMNPlane_1")
-    plane.set("bpmnElement", "Process_1")
+    plane.set("bpmnElement", "Collaboration_1")
+
+    # 1. Shapes das Lanes e Participant
+    # Participant (Pool inteira)
+    shape_pool = ET.SubElement(plane, "bpmndi:BPMNShape")
+    shape_pool.set("id", "Participant_1_di")
+    shape_pool.set("bpmnElement", "Participant_1")
+    shape_pool.set("isHorizontal", "true")
     
-    # Adicionar shapes
+    bounds_pool = ET.SubElement(shape_pool, "dc:Bounds")
+    bounds_pool.set("x", "50")
+    bounds_pool.set("y", "0")
+    bounds_pool.set("width", str(int(total_width)))
+    bounds_pool.set("height", str(int(total_height)))
+    
+    # Shapes individuais das Lanes (Opcional em alguns renderizadores, mas bom para compatibilidade)
+    for i, papel in enumerate(papeis):
+        lid = lane_ids[papel.lower()]
+        shape_lane = ET.SubElement(plane, "bpmndi:BPMNShape")
+        shape_lane.set("id", f"{lid}_di")
+        shape_lane.set("bpmnElement", lid)
+        shape_lane.set("isHorizontal", "true")
+        
+        b_lane = ET.SubElement(shape_lane, "dc:Bounds")
+        b_lane.set("x", "80") # 30px offset para o header da pool
+        b_lane.set("y", str(i * LANE_HEIGHT))
+        b_lane.set("width", str(int(total_width - 30)))
+        b_lane.set("height", str(LANE_HEIGHT))
+
+    # 2. Shapes dos Elementos
     for elem in elementos:
-        elem_id = elem.get("id")
-        
         shape = ET.SubElement(plane, "bpmndi:BPMNShape")
-        shape.set("id", f"Shape_{elem_id}")
-        shape.set("bpmnElement", elem_id)
+        shape.set("id", f"{elem['id']}_di")
+        shape.set("bpmnElement", elem['id'])
         
-        bounds = ET.SubElement(shape, "dc:Bounds")
-        bounds.set("x", str(int(elem['_x'])))
-        bounds.set("y", str(int(elem['_y'])))
-        bounds.set("width", str(int(elem['_width'])))
-        bounds.set("height", str(int(elem['_height'])))
-    
-    # Adicionar edges com waypoints inteligentes
+        b = ET.SubElement(shape, "dc:Bounds")
+        b.set("x", str(int(elem['_x'])))
+        b.set("y", str(int(elem['_y'])))
+        b.set("width", str(int(elem['_width'])))
+        b.set("height", str(int(elem['_height'])))
+
+    # 3. Edges (Fluxos)
     elem_dict = {e['id']: e for e in elementos}
     
-    for i, fluxo in enumerate(fluxos):
+    for fluxo in fluxos:
         edge = ET.SubElement(plane, "bpmndi:BPMNEdge")
-        edge.set("id", f"Edge_{fluxo.get('id', f'Flow_{i+1}')}")
-        edge.set("bpmnElement", fluxo.get("id", f"Flow_{i+1}"))
+        edge.set("id", f"{fluxo['id']}_di")
+        edge.set("bpmnElement", fluxo['id'])
         
-        origem = elem_dict.get(fluxo.get("origem"))
-        destino = elem_dict.get(fluxo.get("destino"))
+        origem = elem_dict.get(fluxo['origem'])
+        destino = elem_dict.get(fluxo['destino'])
         
         if origem and destino:
-            origem_x_end = int(origem['_x'] + origem['_width'])
-            origem_y = int(origem['_y_center'])
-            destino_x_start = int(destino['_x'])
-            destino_y = int(destino['_y_center'])
+            # Lógica simples de waypoint: Centro-Direita -> Centro-Esquerda
+            x1 = int(origem['_x'] + origem['_width'])
+            y1 = int(origem['_cy'])
+            x2 = int(destino['_x'])
+            y2 = int(destino['_cy'])
             
-            # Ponto de saída (direita do elemento de origem)
+            # Ponto 1: Saída
             wp1 = ET.SubElement(edge, "di:waypoint")
-            wp1.set("x", str(origem_x_end))
-            wp1.set("y", str(origem_y))
+            wp1.set("x", str(x1))
+            wp1.set("y", str(y1))
             
-            # Verificar se precisa de waypoints intermediários
-            diff_y = abs(origem_y - destino_y)
+            # Pontos intermediários para troca de Lane (se necessário)
+            # Se a diferença de altura for grande, faz um degrau
+            if abs(y1 - y2) > 20:
+                mid_x = x1 + (x2 - x1) // 2
+                
+                wpm1 = ET.SubElement(edge, "di:waypoint")
+                wpm1.set("x", str(mid_x))
+                wpm1.set("y", str(y1))
+                
+                wpm2 = ET.SubElement(edge, "di:waypoint")
+                wpm2.set("x", str(mid_x))
+                wpm2.set("y", str(y2))
             
-            # Se a linha precisa subir/descer
-            if diff_y > 5:  # Tolerância de 5px para considerar "mesma linha"
-                # Calcular ponto intermediário
-                # Sair 50px para direita, depois descer/subir, depois ir até destino
-                mid_x = origem_x_end + 50
-                
-                # Primeiro waypoint: manter altura da origem
-                wp_mid1 = ET.SubElement(edge, "di:waypoint")
-                wp_mid1.set("x", str(mid_x))
-                wp_mid1.set("y", str(origem_y))
-                
-                # Segundo waypoint: mudar para altura do destino
-                wp_mid2 = ET.SubElement(edge, "di:waypoint")
-                wp_mid2.set("x", str(mid_x))
-                wp_mid2.set("y", str(destino_y))
-                
-                # Se ainda há espaço horizontal, adicionar mais um waypoint
-                if destino_x_start - mid_x > 60:
-                    mid_x2 = destino_x_start - 50
-                    wp_mid3 = ET.SubElement(edge, "di:waypoint")
-                    wp_mid3.set("x", str(mid_x2))
-                    wp_mid3.set("y", str(destino_y))
-            
-            # Ponto de entrada (esquerda do elemento de destino)
+            # Ponto Final: Entrada
             wp2 = ET.SubElement(edge, "di:waypoint")
-            wp2.set("x", str(destino_x_start))
-            wp2.set("y", str(destino_y))
-    
-    # Converter para XML formatado
+            wp2.set("x", str(x2))
+            wp2.set("y", str(y2))
+
     xml_string = ET.tostring(root, encoding='unicode')
     dom = minidom.parseString(xml_string)
-    pretty_xml = dom.toprettyxml(indent="  ")
-    return '\n'.join([line for line in pretty_xml.split('\n') if line.strip()])
+    return '\n'.join([line for line in dom.toprettyxml(indent="  ").split('\n') if line.strip()])
 
 def create_bpmn_viewer(xml_content: str) -> str:
     """Cria visualizador BPMN interativo"""
@@ -490,24 +556,28 @@ def create_bpmn_viewer(xml_content: str) -> str:
     </html>
     """
 
-PROMPT_SYSTEM = """Você é um especialista em BPMN 2.0. Converta a descrição em JSON estruturado.
+PROMPT_SYSTEM = """Você é um especialista em BPMN 2.0. Converta a descrição em JSON estruturado com foco em POOLS e LANES.
 
 ESTRUTURA OBRIGATÓRIA:
 {
   "processo": "Nome do Processo",
   "elementos": [
-    {"id": "StartEvent_1", "tipo": "startEvent", "nome": "Início"},
-    {"id": "Task_1", "tipo": "task", "nome": "Descrição da Tarefa"},
-    {"id": "EndEvent_1", "tipo": "endEvent", "nome": "Fim"}
+    {"id": "StartEvent_1", "tipo": "startEvent", "nome": "Início", "papel": "Cliente"},
+    {"id": "Task_1", "tipo": "task", "nome": "Solicitar Pedido", "papel": "Cliente"},
+    {"id": "Task_2", "tipo": "userTask", "nome": "Aprovar Pedido", "papel": "Gerente"},
+    {"id": "EndEvent_1", "tipo": "endEvent", "nome": "Fim", "papel": "Cliente"}
   ],
   "fluxos": [
-    {"id": "Flow_1", "origem": "StartEvent_1", "destino": "Task_1", "nome": ""},
-    {"id": "Flow_2", "origem": "Task_1", "destino": "EndEvent_1", "nome": ""}
+    {"id": "Flow_1", "origem": "StartEvent_1", "destino": "Task_1"},
+    {"id": "Flow_2", "origem": "Task_1", "destino": "Task_2"}
   ]
 }
 
-TIPOS: startEvent, endEvent, task, userTask, serviceTask, exclusiveGateway, parallelGateway
-RETORNE APENAS O JSON, SEM MARKDOWN OU EXPLICAÇÕES."""
+REGRAS:
+1. "papel" é OBRIGATÓRIO (Ex: Cliente, Sistema, Gerente, RH). Agrupe tarefas do mesmo ator.
+2. TIPOS PERMITIDOS: startEvent, endEvent, task, userTask, serviceTask, exclusiveGateway, parallelGateway.
+3. Se o papel não estiver claro, use "Sistema".
+RETORNE APENAS O JSON."""
 
 def gerar_bpmn(descricao: str, modelo: str, temp: float):
     """Gera BPMN usando Gemini via LangChain"""
